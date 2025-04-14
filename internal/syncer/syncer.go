@@ -253,10 +253,6 @@ func (w *worker) clone(ctx context.Context, path string, job *db.DequeueSyncJobR
 		return err
 	}
 
-	// TODO(@riyaz): we can improve this by first detecting the kind of url
-	// 		and then fetching the appropriate type of credential for it.
-	// 		This still involves couple of challenges (differentiating between different provider tokens etc.)
-
 	// fetch the username and token for the provider
 	var username, token string
 	if username, token, err = w.db.FetchCredential(ctx, repo.Provider); err != nil {
@@ -293,20 +289,53 @@ func (w *worker) clone(ctx context.Context, path string, job *db.DequeueSyncJobR
 	var dotgit, _ = fs.Chroot(".git")
 	var target = filesystem.NewStorage(dotgit, cache.NewObjectLRUDefault())
 
-	var opts = &git.CloneOptions{URL: endpoint.String(), Auth: auth}
-	if _, err = git.CloneContext(ctx, target, fs, opts); err != nil {
-		return errors.Wrapf(err, "failed to clone repository")
+	// Create a channel to signal when the clone is done
+	done := make(chan error, 1)
+	
+	// Start the clone in a goroutine
+	go func() {
+		var opts = &git.CloneOptions{URL: endpoint.String(), Auth: auth}
+		_, err := git.CloneContext(ctx, target, fs, opts)
+		done <- err
+	}()
+
+	// Start a ticker to send keep-alive signals during the clone
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Wait for either the clone to complete or the context to be cancelled
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				return errors.Wrapf(err, "failed to clone repository")
+			}
+			logger.Info().Msgf("finished git repository clone: %s", repo.Repo)
+
+			if err = w.sendBatchLogMessages(ctx, []*syncLog{{
+				Type:            SyncLogTypeInfo,
+				RepoSyncQueueID: job.ID,
+				Message:         "finished git clone successfully: " + repo.Repo,
+			}}); err != nil {
+				return err
+			}
+			return nil
+		case <-ticker.C:
+			// Send keep-alive signal
+			if err := w.db.SetLatestKeepAliveForJob(ctx, job.ID); err != nil {
+				logger.Err(err).Msgf("could not set latest keep alive for job: %d", job.ID)
+			}
+			// Add debug log message for ongoing download
+			logger.Debug().Msgf("still downloading repository: %s", repo.Repo)
+			if err = w.sendBatchLogMessages(ctx, []*syncLog{{
+				Type:            SyncLogTypeInfo,
+				RepoSyncQueueID: job.ID,
+				Message:         "still downloading repository: " + repo.Repo,
+			}}); err != nil {
+				logger.Err(err).Msgf("could not send batch log message: %v", err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-
-	logger.Info().Msgf("finished git repository clone: %s", repo.Repo)
-
-	if err = w.sendBatchLogMessages(ctx, []*syncLog{{
-		Type:            SyncLogTypeInfo,
-		RepoSyncQueueID: job.ID,
-		Message:         "finished git clone successfully: " + repo.Repo,
-	}}); err != nil {
-		return err
-	}
-
-	return nil
 }
