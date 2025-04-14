@@ -182,7 +182,7 @@ func ContainerSync(pgUrl string, workerLogger *zerolog.Logger, querier *db.Queri
 				}
 				defer cleanup() //nolint:errcheck
 
-				if err = clone(ctx, logger, querier, tmpPath, repo); err != nil { // execute the clone operation
+				if err = clone(ctx, logger, querier, tmpPath, repo, job); err != nil { // execute the clone operation
 					logger.Errorf("failed to clone: %s", err.Error())
 					return errors.Wrapf(err, "failed to clone")
 				}
@@ -237,8 +237,32 @@ func log(fn func(string), src io.Reader) {
 }
 
 // clone clones the repository into the given path.
-func clone(ctx context.Context, logger *sqlq.Logger, q *db.Queries, path string, repo db.Repo) (err error) {
+func clone(ctx context.Context, logger *sqlq.Logger, q *db.Queries, path string, repo db.Repo, job *sqlq.Job) (err error) {
 	logger.Infof("pulling git repository: %s", repo.Repo)
+
+	// Create a context with keep-alive functionality
+	keepAliveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start a goroutine to send keep-alive signals every 30 seconds
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				logger.Debugf("sending keep-alive during clone of %s", repo.Repo)
+				// Send keep-alive signal
+				if err := job.SendKeepAlive(ctx, job.KeepAlive-2*time.Second); err != nil {
+					logger.Errorf("failed to send keep-alive during clone: %s", err.Error())
+					return
+				}
+			case <-keepAliveCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// fetch the username and token for the provider
 	var username, token string
@@ -278,7 +302,7 @@ func clone(ctx context.Context, logger *sqlq.Logger, q *db.Queries, path string,
 	} else if errors.Is(err, git.ErrRepositoryNotExists) {
 		// repository doesn't exist locally! perform a fresh clone
 		var opts = &git.CloneOptions{URL: endpoint.String(), Auth: auth}
-		if _, err = git.CloneContext(ctx, target, fs, opts); err != nil {
+		if _, err = git.CloneContext(keepAliveCtx, target, fs, opts); err != nil {
 			logger.Errorf("failed to clone repository: %s", err.Error())
 			return errors.Wrapf(err, "failed to clone repository")
 		}
@@ -286,7 +310,7 @@ func clone(ctx context.Context, logger *sqlq.Logger, q *db.Queries, path string,
 	} else {
 		// repository exists! fetch from remote to update it
 		var opts = &git.FetchOptions{RemoteName: "origin", Auth: auth}
-		if err = repository.FetchContext(ctx, opts); err != nil {
+		if err = repository.FetchContext(keepAliveCtx, opts); err != nil {
 			logger.Errorf("failed to fetch newer changes from origin: %s", err.Error())
 			return errors.Wrapf(err, "failed to fetch newer changes from origin")
 		}
