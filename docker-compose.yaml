@@ -5,6 +5,10 @@ volumes:
   # grafana_lib:
   # grafana_etc:
   # grafana_log:
+networks:
+  default:
+    name: mergestat
+    driver: bridge
 
 services:
   postgres:
@@ -26,7 +30,10 @@ services:
     # NOTE: to opt out of basic image pull tracking, comment out the current image
     # and uncomment the next line (which will pull from Docker Hub directly).
     # image: mergestat/worker:2.3.2-beta
-    image: images.mergestat.com/mergestat/worker:2.3.2-beta
+    # image: images.mergestat.com/mergestat/worker:2.3.2-beta
+    build:
+      context: .
+      dockerfile: Dockerfile
     privileged: true
     stop_grace_period: 10m
     restart: always
@@ -39,7 +46,7 @@ services:
       timeout: 5s
       retries: 5
     environment:
-      POSTGRES_CONNECTION: postgres://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/postgres?sslmode=disable
+      POSTGRES_CONNECTION: "postgres://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/postgres?sslmode=disable"
       CONCURRENCY: 5
       GITHUB_RATE_LIMIT: 1/2
       ENCRYPTION_SECRET: ${ENCRYPTION_SECRET:-password}
@@ -49,13 +56,16 @@ services:
       GITHUB_WORKFLOW_PER_PAGE: 30
       GITHUB_WORKFLOW_RUNS_PER_PAGE: 30
       GITHUB_WORKFLOW_JOBS_PER_PAGE: 30
+      DOCKER_NETWORK_NAME: mergestat_mergestat
+      DOCKER_HOST: unix:///var/run/docker.sock
     ports:
       - 3301:8080
     # NOTE: Uncomment the following to mount a path on disk to the container to access local git repos.
     # When adding a the repo in the UI, use file:///projects/<repo-name> to access the repo.
     # volumes:
     #   - ~/projects:/projects
-
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
   graphql:
     # See NOTE above in worker service.
     # image: mergestat/graphql:2.3.2-beta
@@ -101,7 +111,10 @@ services:
   ui:
     # See NOTE above in worker service.
     # image: mergestat/console:2.3.2-beta
-    image: images.mergestat.com/mergestat/console:2.3.2-beta
+    #image: images.mergestat.com/mergestat/console:2.3.2-beta
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
     restart: always
     depends_on:
       - graphql
@@ -114,6 +127,7 @@ services:
       INSECURE_SESSION_COOKIE: 1
     labels:
       shipyard.route: '/'
+
 
   # grafana:
   #   image: grafana/grafana-oss:latest
