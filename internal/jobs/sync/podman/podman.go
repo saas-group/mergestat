@@ -10,12 +10,13 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
@@ -146,19 +147,34 @@ func ContainerSync(pgUrl string, workerLogger *zerolog.Logger, querier *db.Queri
 				env = append(env, fmt.Sprintf("%s=%s", key, value))
 			}
 
-			ns, err := cli.NetworkList(ctx, types.NetworkListOptions{
-				Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: dockerNetwork}),
-			})
-			if err != nil || len(ns) != 1 {
-				logger.Errorf("could not find docker network %s: %v", dockerNetwork, err)
-				return errors.New("could not find docker network")
+			networks, err := cli.NetworkList(ctx, types.NetworkListOptions{})
+			if err != nil {
+				logger.Errorf("failed to list networks: %w", err)
+				return errors.Wrap(err, "failed to list networks")
+			}
+			
+			var selected *types.NetworkResource
+			for _, n := range networks {
+				if n.Name == dockerNetwork {
+					selected = &n
+					break
+				}
+			}
+			
+			if selected == nil {
+				var names []string
+				for _, n := range networks {
+					names = append(names, n.Name)
+				}
+				logger.Errorf("could not find docker network %s - Found networks: %v", dockerNetwork, names)
+				return fmt.Errorf("could not find docker network %s - Found networks: %v", dockerNetwork, names)
 			}
 
 			resp, err := cli.ContainerCreate(ctx, &container.Config{
 				Image:      image,
 				Env:        env,
 				WorkingDir: "/mergestat/repo",
-			}, nil, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{dockerNetwork: {NetworkID: ns[0].ID}}}, nil, "")
+			}, nil, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{dockerNetwork: {NetworkID: selected.ID}}}, nil, "")
 
 			if err != nil {
 				logger.Errorf("could not create container with image %s: %v", image, err)
@@ -246,7 +262,17 @@ func log(fn func(string), src io.Reader) {
 	// when the output of the container doesn't include a newline character. We should investigate this further.
 	// See here: https://github.com/golang/go/issues/35474. part of this might be we need to handle scanner.Err() as well.
 	for scanner.Scan() {
-		fn(scanner.Text())
+		// Sanitize the line by removing any null bytes and non-printable characters
+		line := scanner.Text()
+		line = strings.Map(func(r rune) rune {
+			if r == 0 || !unicode.IsPrint(r) {
+				return -1
+			}
+			return r
+		}, line)
+		if line != "" {
+			fn(line)
+		}
 	}
 }
 
