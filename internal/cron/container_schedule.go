@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,7 +14,7 @@ import (
 
 // ContainerSync provides a cron function that periodically schedules execution
 // of configured mergestat.container_sync_schedules.
-func ContainerSync(ctx context.Context, dur time.Duration, upstream *sql.DB) {
+func ContainerSync(ctx context.Context, dur time.Duration, upstream *sql.DB, delay time.Duration) {
 	var log = zerolog.Ctx(ctx)
 
 	type Sync = struct {
@@ -24,10 +25,11 @@ func ContainerSync(ctx context.Context, dur time.Duration, upstream *sql.DB) {
 	}
 
 	const listSyncsQuery = `
-WITH schedules(id, queue, job, status, concurrency, priority) AS (
+WITH schedules(id, queue, job, status, concurrency, priority, last_completed_at) AS (
 	SELECT DISTINCT ON (syncs.id) syncs.id, (image.queue || '-' || repo.provider) AS queue, exec.job_id, job.status,
 		CASE WHEN image.queue = 'github' THEN 1 ELSE 0 END AS concurrency,
-		CASE WHEN image.queue = 'github' THEN 1 ELSE 2 END AS priority
+		CASE WHEN image.queue = 'github' THEN 1 ELSE 2 END AS priority,
+		job.completed_at
 		FROM mergestat.container_sync_schedules schd, mergestat.container_syncs syncs
 			INNER JOIN mergestat.container_images image ON image.id = syncs.image_id
 			INNER JOIN public.repos repo ON repo.id = syncs.repo_id
@@ -37,7 +39,8 @@ WITH schedules(id, queue, job, status, concurrency, priority) AS (
 	ORDER BY syncs.id, exec.created_at DESC
 )
 SELECT id, queue, concurrency, priority FROM schedules
-	WHERE (status IS NULL OR status NOT IN ('pending', 'running'));`
+	WHERE (status IS NULL OR status NOT IN ('pending', 'running'))
+	AND (last_completed_at IS NULL OR last_completed_at < now() - $1::interval);`
 
 	const createExecutionQuery = "INSERT INTO mergestat.container_sync_executions (sync_id, job_id) VALUES ($1, $2)"
 	const createQueueQuery = "INSERT INTO sqlq.queues (name, concurrency, priority) VALUES ($1, NULLIF($2,0), $3) ON CONFLICT (name) DO UPDATE SET concurrency = excluded.concurrency, priority = excluded.priority"
@@ -52,7 +55,7 @@ SELECT id, queue, concurrency, priority FROM schedules
 
 		var syncs []Sync
 		var rows *sql.Rows
-		if rows, err = tx.QueryContext(ctx, listSyncsQuery); err != nil {
+		if rows, err = tx.QueryContext(ctx, listSyncsQuery, fmt.Sprintf("%d minutes", int64(delay.Minutes()))); err != nil {
 			return err
 		}
 		defer rows.Close()

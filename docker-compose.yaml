@@ -35,6 +35,7 @@ services:
       context: .
       dockerfile: Dockerfile
     privileged: true
+    user: root
     stop_grace_period: 10m
     restart: always
     depends_on:
@@ -56,14 +57,11 @@ services:
       GITHUB_WORKFLOW_PER_PAGE: 30
       GITHUB_WORKFLOW_RUNS_PER_PAGE: 30
       GITHUB_WORKFLOW_JOBS_PER_PAGE: 30
-      DOCKER_NETWORK_NAME: mergestat_mergestat
+      CONTAINER_SYNC_DELAY_MINUTES: 720
+      DOCKER_NETWORK_NAME: mergestat
       DOCKER_HOST: unix:///var/run/docker.sock
     ports:
       - 3301:8080
-    # NOTE: Uncomment the following to mount a path on disk to the container to access local git repos.
-    # When adding a the repo in the UI, use file:///projects/<repo-name> to access the repo.
-    # volumes:
-    #   - ~/projects:/projects
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
   graphql:

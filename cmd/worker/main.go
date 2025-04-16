@@ -276,6 +276,7 @@ func main() {
 	// either via the database/app or possibly with env vars
 	schedulerInterval := 1
 	syncerInterval := 3
+	containerSyncDelay := 0 // Default to no delay
 
 	if schedulerIntervalStr := os.Getenv("SCHEDULER_INTERVAL_MINUTES"); len(schedulerIntervalStr) != 0 {
 		if schedulerInterval, err = strconv.Atoi(schedulerIntervalStr); err != nil {
@@ -287,6 +288,11 @@ func main() {
 			logger.Err(err).Msgf("Incorrect value for SYNCER_INTERVAL_SECONDS")
 		}
 	}
+	if containerSyncDelayStr := os.Getenv("CONTAINER_SYNC_DELAY_MINUTES"); len(containerSyncDelayStr) != 0 {
+		if containerSyncDelay, err = strconv.Atoi(containerSyncDelayStr); err != nil {
+			logger.Err(err).Msgf("Incorrect value for CONTAINER_SYNC_DELAY_MINUTES")
+		}
+	}
 	go scheduler.New(&logger, pool).Start(ctx, time.Duration(schedulerInterval)*time.Minute)
 	go timeout.New(&logger, pool).Start(ctx, time.Minute)
 	go syncer.New(pool, embedded, &logger, concurrency, time.Duration(syncerInterval)*time.Second).Start(ctx)
@@ -295,8 +301,8 @@ func main() {
 	// these jobs are idempotent, and so, multiple instances can run at same time without conflict
 	go cron.AutoImport(ctx, 15*time.Second, upstream)
 
-	// run container sync scheduler every minute
-	go cron.ContainerSync(ctx, 1*time.Minute, upstream)
+	// run container sync scheduler every minute with configurable delay
+	go cron.ContainerSync(ctx, 1*time.Minute, upstream, time.Duration(containerSyncDelay)*time.Minute)
 
 	if os.Getenv("DEBUG") != "" {
 		go func() {
